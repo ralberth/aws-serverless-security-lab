@@ -1,0 +1,189 @@
+---
+Resources:
+  ObjectMetadataTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: False
+      AttributeDefinitions:
+        - AttributeName: S3ObjectName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: S3ObjectName
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+
+
+  MetadataLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt MetadataLambdaRole.Arn
+      Runtime: python3.7
+      Environment:
+        Variables:
+          TableName:  !Ref ObjectMetadataTable
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          import urllib.parse
+          def lambda_handler(event, context):
+            print(f"Event: {event}")
+            try:
+              sqs_records = event["Records"]
+              for sqs_record in sqs_records:
+                body = json.loads(sqs_record["body"])
+                if body.get("Event") == "s3:TestEvent":
+                  print("Ignorning test event")
+                else:
+                  ddb = boto3.client('dynamodb')
+                  for record in body["Records"]:
+                    bucket = record["s3"]["bucket"]["name"]
+                    object = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
+                    size   = str(record["s3"]["object"]["size"])
+                    time   = record["eventTime"]
+                    oper   = record["eventName"]
+                    print(f"Inserting bucket={bucket}, object={object}, size={size}, time={time}, oper={oper}")
+                    ddb.put_item(
+                      TableName=os.environ["TableName"],
+                      Item={
+                        "S3ObjectName": { "S": object },
+                        "Bucket": { "S": bucket },
+                        "Size": { "N": size },
+                        "CreatedTime": { "S": time },
+                        "Operation": { "S": oper }
+                      }
+                    )
+            except Exception as err:
+              print(f"Exception: {repr(err)}")
+              raise
+
+
+  MetadataLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/job-function/SystemAdministrator
+      Policies:
+        - PolicyName: PutItemDynamoTables
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sqs:*
+                Resource: "*"
+              - Effect: Allow
+                Action: dynamodb:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+
+  QueueLambdaSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt S3NotificationQueue.Arn
+      FunctionName: !Ref MetadataLambda
+
+
+  S3NotificationQueue:
+    Type: AWS::SQS::Queue
+
+
+  S3NotificationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref S3NotificationQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: SQS:SendMessage
+            Resource: !GetAtt S3NotificationQueue.Arn
+            Condition:
+              ArnLike:
+                "aws:SourceArn": !GetAtt FileUploadsBucket.Arn
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+
+
+  FileUploadsBucket:
+    Type: AWS::S3::Bucket
+
+
+  S3EventSubscriptionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt S3EventSubscriptionLambdaRole.Arn
+      Runtime: python3.7
+      Environment:
+        Variables:
+          QueueArn:  !GetAtt S3NotificationQueue.Arn
+          BucketName: !Ref FileUploadsBucket
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import cfnresponse
+          def lambda_handler(event, context):
+            print(f"Event: {event}")
+            try:
+              if event['RequestType'] == 'Create':
+                s3 = boto3.client('s3')
+                s3.put_bucket_notification_configuration(
+                  Bucket=os.environ['BucketName'],
+                  NotificationConfiguration={
+                    'QueueConfigurations': [
+                      {
+                        'QueueArn': os.environ['QueueArn'],
+                        'Events': [ 's3:ObjectCreated:*' ]
+                      }
+                    ]
+                  }
+                )
+              cfnresponse.send(event, context, cfnresponse.SUCCESS,
+                { "QueueArn": os.environ['QueueArn'], "BucketName": os.environ['BucketName'] })
+            except Exception as err:
+              print(f"Exception: {repr(err)}")
+              cfnresponse.send(event, context, cfnresponse.FAILED, { })
+
+
+  S3EventSubscriptionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/job-function/SystemAdministrator
+
+
+  InvokeS3EventSubscriptionLambda:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt S3EventSubscriptionLambda.Arn
