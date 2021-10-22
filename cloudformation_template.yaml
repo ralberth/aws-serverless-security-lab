@@ -75,6 +75,10 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::536023900131:root
+            Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/job-function/SystemAdministrator
       Policies:
