@@ -1,8 +1,27 @@
----
+AWSTemplateFormatVersion : 2010-09-09
+Description: AWS Serverless Security Lab using Amazon S3 and AWS Lambda
+Metadata:
+  Copyright:
+    Value: 'Copyright 2021 Amazon Web Services, Inc. All Rights Reserved.
+      This AWS content is provided subject to the terms of the AWS Customer
+      Agreement available at https://aws.amazon.com/agreement/ or other written
+      agreement between Customer and Amazon Web Services, Inc.'
+    VersionDate:
+      Value: 20211023
+    Identifier:
+      Value: cloudformation_template.yaml
+    Input:
+      Description: Input of all required parameters, if any
+    Output:
+      Description: This creates a test stack that sends Amazon S3 metadata to an AWS Lambda function
+        that stores the data in a Amazon DynamoDB table.  This has security holes in it on purpose.
+        IMPORTANT NOTE - This template does NOT conform to AWS best practices wrt security.
+        DO NOT use this in any production environment.
+
+
 Resources:
   ObjectMetadataTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
@@ -77,14 +96,20 @@ Resources:
             Action: sts:AssumeRole
           - Effect: Allow
             Principal:
-              AWS: arn:aws:iam::536023900131:root
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
             Action: sts:AssumeRole
+      #
+      # Here is a BAD thing to do:  DO NOT do this in practice
+      #
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/job-function/SystemAdministrator
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/job-function/SystemAdministrator
+      #
+      # Here are more BAD thing to do:  DO NOT do this in practice
+      #
       Policies:
         - PolicyName: PutItemDynamoTables
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: 2012-10-17
             Statement:
               - Effect: Allow
                 Action: sqs:*
@@ -117,7 +142,7 @@ Resources:
       Queues:
         - !Ref S3NotificationQueue
       PolicyDocument:
-        Version: "2012-10-17"
+        Version: 2012-10-17
         Statement:
           - Effect: Allow
             Principal:
@@ -130,9 +155,45 @@ Resources:
               StringEquals:
                 "aws:SourceAccount": !Ref AWS::AccountId
 
-
   FileUploadsBucket:
     Type: AWS::S3::Bucket
+    #
+    # Uncomment the below for better security:
+    #
+    #DeletionPolicy: Retain
+    # Properties:
+    #   BucketEncryption:
+    #     ServerSideEncryptionConfiguration:
+    #       -
+    #         ServerSideEncryptionByDefault:
+    #           SSEAlgorithm: AES256
+    #   AccessControl: Private
+    #   PublicAccessBlockConfiguration:
+    #     BlockPublicAcls: True
+    #     BlockPublicPolicy: True
+    #     IgnorePublicAcls: True
+    #     RestrictPublicBuckets: True
+
+
+  # ForceEncryption:
+  #   Type: AWS::S3::BucketPolicy
+  #   Properties:
+  #     Bucket: !Ref FileUploadsBucket
+  #     PolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         - Sid: DenyUnEncryptedObjectUploads
+  #           Effect: Deny
+  #           Principal: "*"
+  #           Action:
+  #             - s3:PutObject
+  #           Resource:
+  #             - !Sub "arn:${AWS::Partition}:s3:::${FileUploadsBucket}/*"
+  #           Condition:
+  #             StringNotEquals:
+  #               "s3:x-amz-server-side-encryption":
+  #                 - "aws:kms"
+  #   DependsOn: FileUploadsBucket
 
 
   S3EventSubscriptionLambda:
@@ -183,9 +244,11 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      #
+      # Here is a BAD thing to do:  DO NOT do this in practice
+      #
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/job-function/SystemAdministrator
-
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/job-function/SystemAdministrator
 
   InvokeS3EventSubscriptionLambda:
     Type: AWS::CloudFormation::CustomResource
